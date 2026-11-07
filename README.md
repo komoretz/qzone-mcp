@@ -36,6 +36,75 @@ npm install
 
 ## 配置 MCP 客户端
 
+将 `/path/to/qzone-mcp` 替换为你的实际路径。
+
+### Claude Desktop
+
+配置文件位置：`%APPDATA%\Claude\claude_desktop_config.json`（Windows）
+
+```json
+{
+  "mcpServers": {
+    "qzone": {
+      "command": "node",
+      "args": ["C:/path/to/qzone-mcp/src/index.js"],
+      "cwd": "C:/path/to/qzone-mcp"
+    }
+  }
+}
+```
+
+### Cursor
+
+设置 → MCP → 添加服务器：
+
+```json
+{
+  "mcpServers": {
+    "qzone": {
+      "command": "node",
+      "args": ["C:/path/to/qzone-mcp/src/index.js"],
+      "cwd": "C:/path/to/qzone-mcp"
+    }
+  }
+}
+```
+
+### VS Code (Continue 扩展)
+
+在 `.continue/config.json` 中添加：
+
+```json
+{
+  "models": [...],
+  "mcpServers": {
+    "qzone": {
+      "command": "node",
+      "args": ["C:/path/to/qzone-mcp/src/index.js"],
+      "cwd": "C:/path/to/qzone-mcp"
+    }
+  }
+}
+```
+
+### Trae
+
+设置 → MCP → 添加 MCP 服务器：
+
+```json
+{
+  "mcpServers": {
+    "qzone": {
+      "command": "node",
+      "args": ["C:/path/to/qzone-mcp/src/index.js"],
+      "cwd": "C:/path/to/qzone-mcp"
+    }
+  }
+}
+```
+
+### 通用配置
+
 ```json
 {
   "mcpServers": {
@@ -47,6 +116,8 @@ npm install
   }
 }
 ```
+
+> **注意**：Windows 路径请使用正斜杠 `/` 或双反斜杠 `\\`。
 
 ## 使用
 
