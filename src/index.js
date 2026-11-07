@@ -75,56 +75,56 @@ async function checkCookieValid(cfg) {
 
 /**
  * 启动持久化浏览器，从中提取最新 Cookie。
- * 如果浏览器已有登录态（user_data 中保存），通常无需扫码。
+ * 登录态完整保存在 user_data/，首次扫码后通常无需再扫。
  * @param {boolean} requireLogin 是否要求必须已登录（未登录则等待扫码）
  */
 async function refreshCookiesFromBrowser(requireLogin = false) {
-  let ctx = null;
+  let context = null;
   try {
-    // 用持久化上下文，复用 user_data 中的登录态
-    const opts = {
+    // 持久化上下文：登录态保存在 user_data/，下次自动复用
+    // 优先用系统 Edge，避免下载 Playwright 浏览器
+    const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+    const launchOpts = {
       headless: false,
       userAgent: UA,
       args: ['--no-first-run', '--no-default-browser-check'],
     };
-    for (const channel of ['msedge', 'chrome']) {
-      try {
-        ctx = await chromium.launchPersistentContext(USER_DATA_DIR, { ...opts, channel });
-        break;
-      } catch {}
-    }
-    if (!ctx) ctx = await chromium.launchPersistentContext(USER_DATA_DIR, opts);
+    if (fs.existsSync(edgePath)) launchOpts.executablePath = edgePath;
+    context = await chromium.launchPersistentContext(USER_DATA_DIR, launchOpts);
 
-    const page = ctx.pages()[0] || (await ctx.newPage());
+    const page = await context.newPage();
     await page.goto('https://user.qzone.qq.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
 
-    // 检查是否已登录
-    const url = page.url();
-    const needLogin = url.includes('ptlogin') || url.includes('xui.ptlogin');
+    let cookies = await context.cookies();
+    let hasPSkey = cookies.some(c => c.name === 'p_skey' && c.value);
 
-    if (needLogin) {
+    if (!hasPSkey) {
       if (!requireLogin) {
-        // 不强制登录，关闭浏览器返回 null
-        await ctx.close();
+        await context.close();
         return null;
       }
-      // 需要登录，等待扫码（最多 180 秒）
-      console.error('[qzone-mcp] 登录态已过期，请扫码登录...');
-      try {
-        await page.waitForFunction(
-          () => !window.location.href.includes('ptlogin') && !window.location.href.includes('xui.ptlogin'),
-          { timeout: 180000 }
-        );
-        await page.waitForTimeout(3000);
-      } catch {
-        await ctx.close();
+      // 需要登录，等待扫码后 p_skey 出现（最多 180 秒）
+      console.error('[qzone-mcp] 请扫码登录 QQ 空间...');
+      const loginDeadline = Date.now() + 180000;
+      let loggedIn = false;
+      while (Date.now() < loginDeadline) {
+        await page.waitForTimeout(2000);
+        const checkCookies = await context.cookies();
+        if (checkCookies.some(c => c.name === 'p_skey' && c.value)) {
+          loggedIn = true;
+          break;
+        }
+      }
+      if (!loggedIn) {
+        await context.close();
         throw new Error('扫码登录超时（180秒）');
       }
+      await page.waitForTimeout(3000);
+      cookies = await context.cookies();
     }
 
     // 提取 Cookie
-    const cookies = await ctx.cookies();
     const cookieDict = {};
     let uin = '';
     for (const c of cookies) {
@@ -135,14 +135,14 @@ async function refreshCookiesFromBrowser(requireLogin = false) {
     }
     if (!uin) uin = (cookieDict.p_uin || '').replace('o', '');
 
-    await ctx.close();
+    await context.close();
 
     if (!cookieDict.p_skey) return null;
     const cfg = { uin, cookies: cookieDict };
     saveConfig(cfg);
     return cfg;
   } catch (e) {
-    if (ctx) await ctx.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
     throw e;
   }
 }

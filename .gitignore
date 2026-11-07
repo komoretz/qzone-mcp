@@ -1,5 +1,8 @@
 config.json
+storage_state.json
 user_data/
 node_modules/
+__pycache__/
+*.pyc
 *.log
 .DS_Store
