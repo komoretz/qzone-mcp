@@ -2,12 +2,15 @@
 /**
  * qzone-mcp —— QQ 空间操作 MCP 服务器
  *
- * 核心设计：浏览器常驻后台，p_skey 不会消失，避免反复扫码。
+ * 方案 A：通过 CDP 连接用户已登录的 Edge，实时提取 Cookie。
+ * 完全不用扫码，只要 Edge 开着且登录了 QQ 空间即可。
  *
- * 1. 首次使用：qzone_login 弹浏览器扫码，登录后浏览器保持后台运行
- * 2. 平时：用后台浏览器里的最新 Cookie 调 API（p_skey 一直有效）
- * 3. Cookie 过期：自动从后台浏览器提取最新 Cookie（无需扫码）
- * 4. 浏览器被关闭：重新启动，若登录态失效才需要重新扫码
+ * 使用前需要用调试端口启动 Edge：
+ *   msedge.exe --remote-debugging-port=9222
+ *
+ * 1. 优先用保存的 Cookie（25 分钟缓存）
+ * 2. 过期则从 Edge 实时提取最新 Cookie（p_skey 一直有效）
+ * 3. 连接失败则提示用户启动带调试端口的 Edge
  */
 
 import fs from 'node:fs';
@@ -21,15 +24,10 @@ import { z } from 'zod';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
-const USER_DATA_DIR = path.join(ROOT, 'user_data');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const COOKIE_NAMES = ['p_skey', 'p_uin', 'skey', 'uin', 'pt4_token', 'ptcz', 'RK', 'pgv_pvid'];
-
-if (!fs.existsSync(USER_DATA_DIR)) fs.mkdirSync(USER_DATA_DIR, { recursive: true });
-
-// 常驻的浏览器上下文（登录后保持运行，不关闭）
-let persistentContext = null;
+const CDP_ENDPOINT = process.env.QZONE_CDP || 'http://localhost:9222';
 
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return null; }
@@ -77,44 +75,42 @@ async function checkCookieValid(cfg) {
 }
 
 /**
- * 获取或创建常驻浏览器上下文。
- * 浏览器启动后保持运行，p_skey 不会消失。
+ * 通过 CDP 连接到用户已登录的 Edge。
+ * 不启动新浏览器，只连接已运行的 Edge。
  */
-async function getPersistentContext() {
-  if (persistentContext) {
-    // 检查是否还活着
-    try {
-      await persistentContext.pages();
-      return persistentContext;
-    } catch {
-      persistentContext = null;
-    }
+async function connectEdge() {
+  try {
+    const browser = await chromium.connectOverCDP(CDP_ENDPOINT);
+    return browser;
+  } catch {
+    throw new Error(
+      `无法连接到 Edge（${CDP_ENDPOINT}）。\n` +
+      `请先用以下命令启动 Edge：\n` +
+      `  msedge.exe --remote-debugging-port=9222\n\n` +
+      `然后在 Edge 里登录 QQ 空间，再调用工具。`
+    );
   }
-  const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-  const launchOpts = {
-    headless: false,
-    userAgent: UA,
-    args: ['--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling'],
-  };
-  if (fs.existsSync(edgePath)) launchOpts.executablePath = edgePath;
-  persistentContext = await chromium.launchPersistentContext(USER_DATA_DIR, launchOpts);
-  return persistentContext;
 }
 
-/** 从常驻浏览器提取最新 Cookie */
-async function extractCookiesFromContext() {
-  const ctx = await getPersistentContext();
-  const cookies = await ctx.cookies();
+/** 从已连接的 Edge 实时提取最新 Cookie */
+async function extractCookiesFromEdge() {
+  const browser = await connectEdge();
+  const contexts = browser.contexts();
   const cookieDict = {};
   let uin = '';
-  for (const c of cookies) {
-    if (COOKIE_NAMES.includes(c.name) || c.name.startsWith('p_') || c.name.startsWith('pt')) {
-      cookieDict[c.name] = c.value;
+  for (const ctx of contexts) {
+    const cookies = await ctx.cookies();
+    for (const c of cookies) {
+      if (COOKIE_NAMES.includes(c.name) || c.name.startsWith('p_') || c.name.startsWith('pt')) {
+        cookieDict[c.name] = c.value;
+      }
+      if (c.name === 'uin') uin = c.value.replace('o', '');
     }
-    if (c.name === 'uin') uin = c.value.replace('o', '');
   }
   if (!uin) uin = (cookieDict.p_uin || '').replace('o', '');
-  if (!cookieDict.p_skey) return null;
+  if (!cookieDict.p_skey) {
+    throw new Error('Edge 中未找到 p_skey，请在 Edge 里登录 QQ 空间后重试。');
+  }
   const cfg = { uin, cookies: cookieDict };
   saveConfig(cfg);
   return cfg;
@@ -123,8 +119,8 @@ async function extractCookiesFromContext() {
 /**
  * 确保有有效的 Cookie。
  * 1. 先用保存的 Cookie（25 分钟缓存）
- * 2. 过期则从常驻浏览器提取最新 Cookie
- * 3. 浏览器未登录则等待扫码
+ * 2. 过期则从 Edge 实时提取最新 Cookie
+ * 3. 提取失败则提示用户启动 Edge
  */
 const COOKIE_CACHE_TTL = 25 * 60 * 1000;
 let lastCheckTime = 0;
@@ -145,57 +141,33 @@ async function ensureValidConfig() {
   }
   lastValid = false;
 
-  // 从常驻浏览器提取最新 Cookie
-  try {
-    cfg = await extractCookiesFromContext();
-    if (cfg && await checkCookieValid(cfg)) {
-      lastCheckTime = Date.now();
-      lastValid = true;
-      return cfg;
-    }
-  } catch {}
-
-  // 浏览器也未登录，需要扫码
-  cfg = await loginAndWait();
-  if (cfg) {
+  // 从 Edge 实时提取最新 Cookie
+  cfg = await extractCookiesFromEdge();
+  if (cfg && await checkCookieValid(cfg)) {
     lastCheckTime = Date.now();
     lastValid = true;
     return cfg;
   }
 
-  throw new Error('无法获取有效登录态，请调用 qzone_login 扫码');
-}
-
-/** 启动浏览器并等待扫码登录 */
-async function loginAndWait() {
-  const ctx = await getPersistentContext();
-  const page = ctx.pages().length > 0 ? ctx.pages()[0] : await ctx.newPage();
-  try {
-    await page.goto('https://user.qzone.qq.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  } catch {}
-
-  console.error('[qzone-mcp] 请扫码登录 QQ 空间...');
-  const deadline = Date.now() + 300000;
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(2000);
-    const cfg = await extractCookiesFromContext();
-    if (cfg && await checkCookieValid(cfg)) return cfg;
-  }
-  throw new Error('扫码登录超时（300秒）');
+  throw new Error('Cookie 无效，请在 Edge 里确认已登录 QQ 空间。');
 }
 
 const server = new McpServer({ name: 'qzone', version: '1.0.0' });
 
 server.tool(
-  'qzone_login',
-  '扫码登录 QQ 空间。登录后浏览器保持后台运行，只要不关闭就无需再扫码。',
+  'qzone_check_login',
+  '检查 Edge 登录状态。确认 Edge 已用 --remote-debugging-port=9222 启动且已登录 QQ 空间。',
   {},
   async () => {
     try {
-      const cfg = await loginAndWait();
-      return { content: [{ type: 'text', text: `登录成功！QQ 号：${cfg.uin}\n浏览器已保持后台运行，后续无需再扫码。` }] };
+      const cfg = await extractCookiesFromEdge();
+      const valid = await checkCookieValid(cfg);
+      if (valid) {
+        return { content: [{ type: 'text', text: `登录有效！QQ 号：${cfg.uin}\n可以直接使用 qzone_get_feed_list 和 qzone_comment_feed。` }] };
+      }
+      return { content: [{ type: 'text', text: '已连接 Edge 但 Cookie 无效，请在 Edge 里重新登录 QQ 空间。' }], isError: true };
     } catch (e) {
-      return { content: [{ type: 'text', text: `登录失败：${e?.message ?? e}` }], isError: true };
+      return { content: [{ type: 'text', text: `检查失败：${e?.message ?? e}` }], isError: true };
     }
   }
 );
@@ -279,20 +251,6 @@ server.tool(
     } catch (e) {
       return { content: [{ type: 'text', text: `失败：${e?.message ?? e}` }], isError: true };
     }
-  }
-);
-
-server.tool(
-  'qzone_close_browser',
-  '关闭后台浏览器。关闭后需要重新登录。仅在不需要使用时调用。',
-  {},
-  async () => {
-    if (persistentContext) {
-      await persistentContext.close().catch(() => {});
-      persistentContext = null;
-      return { content: [{ type: 'text', text: '后台浏览器已关闭。下次使用需重新登录。' }] };
-    }
-    return { content: [{ type: 'text', text: '浏览器未运行。' }] };
   }
 );
 

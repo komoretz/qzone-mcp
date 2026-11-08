@@ -1,8 +1,15 @@
 config.json
 storage_state.json
 user_data/
+edge-profile/
 node_modules/
 __pycache__/
 *.pyc
 *.log
 .DS_Store
+_test_*.js
+_chk.py
+_dbg*.py
+_debug*.js
+_login_check.js
+_check*.js
